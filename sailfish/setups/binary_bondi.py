@@ -72,6 +72,10 @@ class BinaryBondi(Setup):
         return 10.0
 
     @property
+    def reference_time_scale(self):
+        return 2.0 * pi
+
+    @property
     def orbital_elements(self):
         return OrbitalElements(
             semimajor_axis=self.bh_sep,
