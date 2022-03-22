@@ -10,6 +10,7 @@ as Bondi-Hoyle-Lyttleton accretion. Some references below:
 .. _Soker (2004): https://academic.oup.com/mnras/article/350/4/1366/986224
 """
 
+from math import pi
 from sailfish.mesh import PlanarCartesian2DMesh
 from sailfish.physics.circumbinary import SinkModel, PointMass, EquationOfState
 from sailfish.physics.kepler import OrbitalElements
