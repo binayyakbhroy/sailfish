@@ -93,7 +93,13 @@ class Patch:
 
         m1, m2 = self.physics.point_masses(self.time)
         with self.execution_context:
-            cons_rate = self.xp.zeros_like(self.conserved0)
+            cons_rate = self.xp.zeros(
+                (
+                    self.conserved0.shape[0],
+                    self.conserved0.shape[1],
+                    self.conserved0.shape[2] + 1,
+                )
+            )
 
             self.lib.cbdiso_2d_point_mass_source_term[self.shape](
                 self.xl,
@@ -135,8 +141,8 @@ class Patch:
                 self.xr,
                 self.yl,
                 self.yr,
-                self.physics.sound_speed**2,
-                self.physics.mach_number**2,
+                self.physics.sound_speed ** 2,
+                self.physics.mach_number ** 2,
                 self.physics.eos_type.value,
                 m1.position_x,
                 m1.position_y,
@@ -213,8 +219,8 @@ class Patch:
                 m2.sink_rate,
                 m2.sink_radius,
                 m2.sink_model.value,
-                self.physics.sound_speed**2,
-                self.physics.mach_number**2,
+                self.physics.sound_speed ** 2,
+                self.physics.mach_number ** 2,
                 self.physics.eos_type.value,
                 self.physics.viscosity_coefficient,
                 rk_param,
