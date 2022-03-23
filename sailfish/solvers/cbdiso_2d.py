@@ -369,7 +369,8 @@ class Solver(SolverBase):
                 return a
 
         def patch_reduction(patch, which):
-            return patch.point_mass_source_term(which).sum(axis=(0, 1)) * da
+            with patch.execution_context:
+                return patch.point_mass_source_term(which).sum(axis=(0, 1)) * da
 
         da = self.mesh.dx * self.mesh.dy
         point_mass_reductions = [self.time]
