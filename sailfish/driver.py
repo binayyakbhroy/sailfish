@@ -145,12 +145,15 @@ def write_checkpoint(number, outdir, state):
         pathlib.Path(outdir).mkdir(parents=True, exist_ok=True)
         filename = os.path.join(outdir, filename)
 
+    cfl_number = state.driver.cfl_number or state.solver.recommended_cfl
+
     state_checkpoint_dict = dict(
         iteration=state.iteration,
         time=state.solver.time,
         solution=state.solver.solution,
         primitive=state.solver.primitive,
         timeseries=state.timeseries,
+        cfl_number=cfl_number,
         solver=state.setup.solver,
         solver_options=state.solver.options,
         event_states=state.event_states,
