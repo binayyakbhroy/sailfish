@@ -85,8 +85,9 @@ PRIVATE void point_mass_source_term(
     struct PointMass *mass,
     double x1,
     double y1,
+    double dt,
     double *prim,
-    double *cons_dot)
+    double *delta_cons)
 {
     double x0 = mass->x;
     double y0 = mass->y;
@@ -108,9 +109,9 @@ PRIVATE void point_mass_source_term(
     {
         case 1: // acceleration-free
         {
-            cons_dot[0] =  mdot;
-            cons_dot[1] =  mdot * prim[1] +  fx;
-            cons_dot[2] =  mdot * prim[2] +  fy;
+            delta_cons[0] = dt * mdot;
+            delta_cons[1] = dt * mdot * prim[1] + dt * fx;
+            delta_cons[2] = dt * mdot * prim[2] + dt * fy;
             break;
         }
         case 2: // torque-free
@@ -124,23 +125,23 @@ PRIVATE void point_mass_source_term(
             double dvdotrhat = (vx - vx0) * rhatx + (vy - vy0) * rhaty;
             double vxstar = dvdotrhat * rhatx + vx0;
             double vystar = dvdotrhat * rhaty + vy0;
-            cons_dot[0] =  mdot;
-            cons_dot[1] =  mdot * vxstar +  fx;
-            cons_dot[2] =  mdot * vystar +  fy;
+            delta_cons[0] = dt * mdot;
+            delta_cons[1] = dt * mdot * vxstar + dt * fx;
+            delta_cons[2] = dt * mdot * vystar + dt * fy;
             break;
         }
         case 3: // force-free
         {
-            cons_dot[0] =  mdot;
-            cons_dot[1] =  fx;
-            cons_dot[2] =  fy;
+            delta_cons[0] = dt * mdot;
+            delta_cons[1] = dt * fx;
+            delta_cons[2] = dt * fy;
             break;
         }
         default: // sink is inactive
         {
-            cons_dot[0] = 0.0;
-            cons_dot[1] = 0.0;
-            cons_dot[2] = 0.0;
+            delta_cons[0] = 0.0;
+            delta_cons[1] = 0.0;
+            delta_cons[2] = 0.0;
             break;
         }
     }
@@ -150,21 +151,21 @@ PRIVATE void point_masses_source_term(
     struct PointMassList *mass_list,
     double x1,
     double y1,
+    double dt,
     double *prim,
-    double *cons_dot)
+    double *cons)
 {
     for (int p = 0; p < 2; ++p)
     {
-        double cons_dot_single[NCONS];
-        point_mass_source_term(&mass_list->masses[p], x1, y1, prim, cons_dot_single);
+        double delta_cons[NCONS];
+        point_mass_source_term(&mass_list->masses[p], x1, y1, dt, prim, delta_cons);
 
         for (int q = 0; q < NCONS; ++q)
         {
-            cons_dot[q] += cons_dot_single[q];
+            cons[q] += delta_cons[q];
         }
     }
 }
-
 
 // ============================ EOS AND BUFFER ================================
 // ============================================================================
@@ -223,24 +224,6 @@ PRIVATE void buffer_source_term(
     }
 }
 
-PRIVATE void shear_strain(
-    const double *gx,
-    const double *gy,
-    double dx,
-    double dy,
-    double *s)
-{
-    double sxx = 4.0 / 3.0 * gx[1] / dx - 2.0 / 3.0 * gy[2] / dy;
-    double syy =-2.0 / 3.0 * gx[1] / dx + 4.0 / 3.0 * gy[2] / dy;
-    double sxy = 1.0 / 1.0 * gx[2] / dx + 1.0 / 1.0 * gy[1] / dy;
-    double syx = sxy;
-    s[0] = sxx;
-    s[1] = sxy;
-    s[2] = syx;
-    s[3] = syy;
-}
-
-
 // ============================ HYDRO =========================================
 // ============================================================================
 PRIVATE void conserved_to_primitive(
@@ -257,21 +240,6 @@ PRIVATE void conserved_to_primitive(
     prim[0] = rho;
     prim[1] = vx;
     prim[2] = vy;
-}
-
-PRIVATE void primitive_to_conserved(
-    const double *prim,
-    double *cons)
-{
-    double rho = prim[0];
-    double vx = prim[1];
-    double vy = prim[2];
-    double px = vx * rho;
-    double py = vy * rho;
-
-    cons[0] = rho;
-    cons[1] = px;
-    cons[2] = py;
 }
 
 PRIVATE double primitive_to_velocity(
@@ -331,6 +299,7 @@ PRIVATE void riemann_hlle(
     const double *ur,
     double *flux,
     double cs2,
+    double velocity_ceiling,
     int direction)
 {
     double pl[NCONS];
@@ -340,8 +309,8 @@ PRIVATE void riemann_hlle(
     double al[2];
     double ar[2];
 
-    conserved_to_primitive(ul, pl);
-    conserved_to_primitive(ur, pr);
+    conserved_to_primitive(ul, pl, velocity_ceiling);
+    conserved_to_primitive(ur, pr, velocity_ceiling);
     primitive_to_flux(pl, ul, fl, cs2, direction);
     primitive_to_flux(pr, ur, fr, cs2, direction);
     primitive_to_outer_wavespeeds(pl, al, cs2, direction);
@@ -356,28 +325,18 @@ PRIVATE void riemann_hlle(
     }
 }
 
-PRIVATE double dot(double *u, double *p)
-{
-    double sum = 0.0;
-
-    for (int i = 0; i < NPOLY; ++i) {
-        sum += u[i] * p[i];
-    }
-    return sum;
-}
-
 // ============================ PUBLIC API ====================================
 // ============================================================================
-PUBLIC void cbdiso_2d_advance_rk(
+PUBLIC void cbdisodg_2d_advance_rk(
     int ni,
     int nj,
     double patch_xl, // mesh
     double patch_xr,
     double patch_yl,
     double patch_yr,
-    double *weights0, // :: $.shape == (ni + 2, nj + 2, 18) # 18 = NCONS * NPOLY
-    double *weights1, // :: $.shape == (ni + 2, nj + 2, 18) # 18 = NCONS * NPOLY
-    double *weights2, // :: $.shape == (ni + 2, nj + 2, 18) # 18 = NCONS * NPOLY
+    double *weights0, // :: $.shape == (ni + 2, nj + 2, 3, 6) # 3, 6 = NCONS, NPOLY
+    double *weights1, // :: $.shape == (ni + 2, nj + 2, 3, 6) # 3, 6 = NCONS, NPOLY
+    double *weights2, // :: $.shape == (ni + 2, nj + 2, 3, 6) # 3, 6 = NCONS, NPOLY
     double buffer_surface_density,
     double buffer_central_mass,
     double buffer_driving_rate,
@@ -426,8 +385,13 @@ PUBLIC void cbdiso_2d_advance_rk(
     double nhat[2] = {-1.0, 1.0};
     // Scaled LeGendre polynomials at left face
     double pfl[3] = {1.000000000000000, -1.732050807568877, 2.23606797749979};
+    // Derivative of Scaled LeGendre polynomials at left face
+    double ppfl[3] = {0.000000000000000, 1.732050807568877, -6.708203932499369};
     // Scaled LeGendre polynomials at right face
     double pfr[3] = {1.000000000000000,  1.732050807568877, 2.23606797749979};
+    // Derivative of Scaled LeGendre polynomials at right face
+    double ppfr[3] = {0.000000000000000, 1.732050807568877, 6.708203932499369};
+
 
     struct KeplerianBuffer buffer = {
         buffer_surface_density,
@@ -489,131 +453,38 @@ PUBLIC void cbdiso_2d_advance_rk(
         double *ulj = &weights1[nlj];
         double *urj = &weights1[nrj];
 
-        double fli[NCONS];
-        double fri[NCONS];
-        double flj[NCONS];
-        double frj[NCONS];
-        double pcc[NCONS];
-        double pij[NCONS];
-        double uij[NCONS];
-        double ulim[NCONS];
-        double ulip[NCONS];
-        double urim[NCONS];
-        double urip[NCONS];
-        double uljm[NCONS];
-        double uljp[NCONS];
-        double urjm[NCONS];
-        double urjp[NCONS];
-
-        // face node values of basis function phi
-        double phili[NPOLY];
-        double phiri[NPOLY];
-        double philj[NPOLY];
-        double phirj[NPOLY];
+        double flux[NCONS];
+        double um[NCONS];
+        double up[NCONS];
+        double dudxm[NCONS];
+        double dudxp[NCONS];
+        double dudym[NCONS];
+        double dudyp[NCONS];
 
         // interior node values of basis function phi and derivatives
-        double phiij[NPOLY];
+        double phi[NPOLY];
         double dphidx[NPOLY];
         double dphidy[NPOLY];
+
+        // left face node values of basis function phi and derivatives
+        double phil[NPOLY];
+        double dphidxl[NPOLY];
+        double dphidyl[NPOLY];
+
+        // right face node values of basis function phi and derivatives
+        double phir[NPOLY];
+        double dphidxr[NPOLY];
+        double dphidyr[NPOLY];
 
         double surface_term[NCONS * NPOLY];
         double volume_term[NCONS * NPOLY];
 
-        // Surface term; loop over face nodes
-
-        for (int ip = 0; ip < 3; ++ip)
+        for (int q = 0; q < NCONS; ++q)
         {
-            // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) at face points
-            int il = 0;
-            for (int m = 0; m < 3; ++m)
+            for (int l = 0; l < NPOLY; ++l)
             {
-                for (int n = 0; n < 3; ++n)
-                {
-                    if ((n + m) < 3)
-                    {
-                        phili[il] = pfl[m] * p[n][ip];
-                        phiri[il] = pfr[m] * p[n][ip];
-                        philj[il] = pfl[n] * p[m][ip];
-                        phirj[il] = pfr[n] * p[m][ip];
-                        il += 1;
-                    }
-                }
-            }
-
-            double xp = xc + 0.5 * g[ip] * dx;
-            double yp = yc + 0.5 * g[ip] * dy;
-
-            double cs2li = sound_speed_squared(cs2, mach_squared, eos_type, xl, yp, &mass_list);
-            double cs2ri = sound_speed_squared(cs2, mach_squared, eos_type, xr, yp, &mass_list);
-            double cs2lj = sound_speed_squared(cs2, mach_squared, eos_type, xp, yl, &mass_list);
-            double cs2rj = sound_speed_squared(cs2, mach_squared, eos_type, xp, yr, &mass_list);
-
-            for (int q = 0; q < NCONS; ++q){
-
-                ulim[q] = 0.0;
-                ulip[q] = 0.0;
-                urim[q] = 0.0;
-                urip[q] = 0.0;
-                uljm[q] = 0.0;
-                uljp[q] = 0.0;
-                urjm[q] = 0.0;
-                urjp[q] = 0.0;
-
-                for (int l = 0; l < NPOLY; ++l)
-                {
-                    ulim[q] += uli[NPOLY * q + l] * phiri[l]; // right face of zone i-1
-                    ulip[q] += ucc[NPOLY * q + l] * phili[l]; // left face of zone i
-                    urim[q] += ucc[NPOLY * q + l] * phiri[l]; // right face of zone i
-                    urip[q] += uri[NPOLY * q + l] * phili[l]; // left face of zone i+1
-                    uljm[q] += ulj[NPOLY * q + l] * phirj[l]; // top face of zone j-1
-                    uljp[q] += ucc[NPOLY * q + l] * philj[l]; // bottom face of zone j
-                    urjm[q] += ucc[NPOLY * q + l] * phirj[l]; // top face of zone j
-                    urjp[q] += urj[NPOLY * q + l] * philj[l]; // bottom face of zone j+1                     j
-                }
-            }
-
-            riemann_hlle(ulim, ulip, fli, cs2li, 0);
-            riemann_hlle(urim, urip, fri, cs2ri, 0);
-            riemann_hlle(uljm, uljp, flj, cs2lj, 1);
-            riemann_hlle(urjm, urjp, frj, cs2rj, 1);
-
-            // Add viscous fluxes here? Use strain averaged across face?
-
-            // Compute viscous fluxes here?
-
-            //if (nu > 0.0)
-            //{
-            //    double sli[4];
-            //    double sri[4];
-            //    double slj[4];
-            //    double srj[4];
-            //    double scc[4];
-            //    shear_strain(gxli, gyli, dx, dy, sli);
-            //    shear_strain(gxri, gyri, dx, dy, sri);
-            //    shear_strain(gxlj, gylj, dx, dy, slj);
-            //    shear_strain(gxrj, gyrj, dx, dy, srj);
-            //    shear_strain(gxcc, gycc, dx, dy, scc);
-            //    fli[1] -= 0.5 * nu * (pli[0] * sli[0] + pcc[0] * scc[0]); // x-x
-            //    fli[2] -= 0.5 * nu * (pli[0] * sli[1] + pcc[0] * scc[1]); // x-y
-            //    fri[1] -= 0.5 * nu * (pcc[0] * scc[0] + pri[0] * sri[0]); // x-x
-            //    fri[2] -= 0.5 * nu * (pcc[0] * scc[1] + pri[0] * sri[1]); // x-y
-            //    flj[1] -= 0.5 * nu * (plj[0] * slj[2] + pcc[0] * scc[2]); // y-x
-            //    flj[2] -= 0.5 * nu * (plj[0] * slj[3] + pcc[0] * scc[3]); // y-y
-            //    frj[1] -= 0.5 * nu * (pcc[0] * scc[2] + prj[0] * srj[2]); // y-x
-            //    frj[2] -= 0.5 * nu * (pcc[0] * scc[3] + prj[0] * srj[3]); // y-y
-            //}
-
-            for (int q = 0; q < NCONS; ++q)
-            {
-                for (int l = 0; l < NPOLY; ++l)
-                {
-                    surface_term[NPOLY * q + l] -= (
-                        fli[q] * nhat[0] * phili[l] * w[ip] * dx +
-                        fri[q] * nhat[1] * phiri[l] * w[ip] * dx +
-                        flj[q] * nhat[0] * philj[l] * w[ip] * dy +
-                        frj[q] * nhat[1] * phirj[l] * w[ip] * dy
-                    );
-                }
+                surface_term[NPOLY * q + l] = 0.0;
+                volume_term[ NPOLY * q + l] = 0.0;
             }
         }
 
@@ -625,7 +496,7 @@ PUBLIC void cbdiso_2d_advance_rk(
                 double xp = xc + 0.5 * g[ic] * dx;
                 double yp = yc + 0.5 * g[jc] * dy;
 
-                double cs2ij = sound_speed_squared(cs2, mach_squared, eos_type, xp, yp, &mass_list);
+                double cs2p = sound_speed_squared(cs2, mach_squared, eos_type, xp, yp, &mass_list);
 
                 // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) and derivatives at cell points
                 int il = 0;
@@ -635,7 +506,7 @@ PUBLIC void cbdiso_2d_advance_rk(
                     {
                         if ((n + m) < 3)
                         {
-                            phiij[il]  =  p[m][ic] *  p[n][jc];
+                            phi[il]  =  p[m][ic] *  p[n][jc];
                             dphidx[il] = pp[m][ic] *  p[n][jc];
                             dphidy[il] =  p[m][ic] * pp[n][jc];
                             il += 1;
@@ -645,14 +516,20 @@ PUBLIC void cbdiso_2d_advance_rk(
 
                 double uij[NCONS];
                 double pij[NCONS];
+                double dudx[NCONS];
+                double dudy[NCONS];
 
                 for (int q = 0; q < NCONS; ++q)
                 {
                     uij[q] = 0.0;
+                    dudx[q] = 0.0;
+                    dudy[q] = 0.0;
 
                     for (int l = 0; l < NPOLY; ++l)
                     {
-                        uij[q] += ucc[NPOLY * q + l] * phiij[l];
+                        uij[q]  += ucc[NPOLY * q + l] * phi[l];
+                        dudx[q] += ucc[NPOLY * q + l] * dphidx[l];
+                        dudy[q] += ucc[NPOLY * q + l] * dphidy[l];
                     }
                 }
 
@@ -665,15 +542,34 @@ PUBLIC void cbdiso_2d_advance_rk(
 
                 conserved_to_primitive(uij, pij, velocity_ceiling);
                 buffer_source_term(&buffer, xp, yp, uij, u_dot);
-                point_masses_source_term(&mass_list, xp, yp, pij, u_dot);
+                point_masses_source_term(&mass_list, xp, yp, 1.0, pij, u_dot);
 
                 double flux_x[NCONS];
                 double flux_y[NCONS];
 
-                primitive_to_flux(pij, uij, flux_x, cs2ij, 0);
-                primitive_to_flux(pij, uij, flux_y, cs2ij, 1);
+                primitive_to_flux(pij, uij, flux_x, cs2p, 0);
+                primitive_to_flux(pij, uij, flux_y, cs2p, 1);
 
-                // Add viscous fluxes here? Use point value of strain.
+                if (nu > 0.0)
+                {
+                    // velocity derivatives
+                    double dvxdx = dudx[1] / uij[0] - uij[1] * dudx[0] / uij[0] / uij[0]; 
+                    double dvydx = dudx[2] / uij[0] - uij[2] * dudx[0] / uij[0] / uij[0]; 
+                    double dvxdy = dudy[1] / uij[0] - uij[1] * dudy[0] / uij[0] / uij[0]; 
+                    double dvydy = dudy[2] / uij[0] - uij[2] * dudy[0] / uij[0] / uij[0]; 
+                    
+                    double mu = uij[0] * nu;
+    
+                    // viscous stress tensor components
+                    double tau_xx = 4.0 / 3.0 * dvxdx - 2.0 / 3.0 * dvydy; 
+                    double tau_yy = 4.0 / 3.0 * dvydy - 2.0 / 3.0 * dvxdx; 
+                    double tau_xy = dvxdy + dvydx;
+    
+                    flux_x[1] -= mu * tau_xx;
+                    flux_x[2] -= mu * tau_xy;
+                    flux_y[1] -= mu * tau_xy;
+                    flux_y[2] -= mu * tau_yy;
+                }
 
                 for (int q = 0; q < NCONS; ++q)
                 {
@@ -682,10 +578,513 @@ PUBLIC void cbdiso_2d_advance_rk(
                         volume_term[NPOLY * q + l] +=
                             w[ic] * w[jc] *
                             (flux_x[q] * dphidx[l] * dx + flux_y[q] * dphidy[l] * dy
-                                + 0.5 * dx * dy * u_dot[q] * phiij[l]);
+                                + 0.5 * dx * dy * u_dot[q] * phi[l]);
                     }
                 }
             }
+        }
+
+        //// Surface term; loop over face nodes
+//
+        //for (int ip = 0; ip < 3; ++ip)
+        //{
+        //    // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) at face nodes
+        //    int il = 0;
+        //    for (int m = 0; m < 3; ++m)
+        //    {
+        //        for (int n = 0; n < 3; ++n)
+        //        {
+        //            if ((n + m) < 3)
+        //            {
+        //                phili[il] = pfl[m] * p[n][ip];
+        //                phiri[il] = pfr[m] * p[n][ip];
+        //                philj[il] = pfl[n] * p[m][ip];
+        //                phirj[il] = pfr[n] * p[m][ip];
+        //                il += 1;
+        //            }
+        //        }
+        //    }
+//
+        //    double xp = xc + 0.5 * g[ip] * dx;
+        //    double yp = yc + 0.5 * g[ip] * dy;
+//
+        //    double cs2li = sound_speed_squared(cs2, mach_squared, eos_type, xl, yp, &mass_list);
+        //    double cs2ri = sound_speed_squared(cs2, mach_squared, eos_type, xr, yp, &mass_list);
+        //    double cs2lj = sound_speed_squared(cs2, mach_squared, eos_type, xp, yl, &mass_list);
+        //    double cs2rj = sound_speed_squared(cs2, mach_squared, eos_type, xp, yr, &mass_list);
+//
+        //    for (int q = 0; q < NCONS; ++q){
+//
+        //        ulim[q] = 0.0;
+        //        ulip[q] = 0.0;
+        //        urim[q] = 0.0;
+        //        urip[q] = 0.0;
+        //        uljm[q] = 0.0;
+        //        uljp[q] = 0.0;
+        //        urjm[q] = 0.0;
+        //        urjp[q] = 0.0;
+//
+        //        for (int l = 0; l < NPOLY; ++l)
+        //        {
+        //            ulim[q] += uli[NPOLY * q + l] * phiri[l]; // right face of zone i-1
+        //            ulip[q] += ucc[NPOLY * q + l] * phili[l]; // left face of zone i
+        //            urim[q] += ucc[NPOLY * q + l] * phiri[l]; // right face of zone i
+        //            urip[q] += uri[NPOLY * q + l] * phili[l]; // left face of zone i+1
+        //            uljm[q] += ulj[NPOLY * q + l] * phirj[l]; // top face of zone j-1
+        //            uljp[q] += ucc[NPOLY * q + l] * philj[l]; // bottom face of zone j
+        //            urjm[q] += ucc[NPOLY * q + l] * phirj[l]; // top face of zone j
+        //            urjp[q] += urj[NPOLY * q + l] * philj[l]; // bottom face of zone j+1                     j
+        //        }
+        //    }
+//
+        //    riemann_hlle(ulim, ulip, fli, cs2li, 0);
+        //    riemann_hlle(urim, urip, fri, cs2ri, 0);
+        //    riemann_hlle(uljm, uljp, flj, cs2lj, 1);
+        //    riemann_hlle(urjm, urjp, frj, cs2rj, 1);
+//
+        //    for (int q = 0; q < NCONS; ++q)
+        //    {
+        //        for (int l = 0; l < NPOLY; ++l)
+        //        {
+        //            surface_term[NPOLY * q + l] -= (
+        //                fli[q] * nhat[0] * phili[l] * w[ip] * dx +
+        //                fri[q] * nhat[1] * phiri[l] * w[ip] * dx +
+        //                flj[q] * nhat[0] * philj[l] * w[ip] * dy +
+        //                frj[q] * nhat[1] * phirj[l] * w[ip] * dy
+        //            );
+        //        }
+        //    }
+        //}
+
+        // Surface terms; loop over face nodes (one face at a time)
+        
+        // Left face
+        for (int ip = 0; ip < 3; ++ip)
+        {
+            double yp = yc + 0.5 * g[ip] * dy;
+
+            double cs2p = sound_speed_squared(cs2, mach_squared, eos_type, xl, yp, &mass_list);
+
+            // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) and derivatives at face nodes
+            int il = 0;
+            for (int m = 0; m < 3; ++m)
+            {
+                for (int n = 0; n < 3; ++n)
+                {
+                    if ((n + m) < 3)
+                    {
+                        // phi and derivatives at left side of zone
+                        phil[il]    =    pfl[m] *  p[n][ip];
+                        dphidxl[il] =   ppfl[m] *  p[n][ip];
+                        dphidyl[il] =    pfl[m] * pp[n][ip];
+                        // phi and derivatives at right side of zone
+                        phir[il]    =    pfr[m] *  p[n][ip];
+                        dphidxr[il] =   ppfr[m] *  p[n][ip];
+                        dphidyr[il] =    pfr[m] * pp[n][ip];      
+                        il += 1;
+                    }
+                }
+            }
+            for (int q = 0; q < NCONS; ++q){
+
+                // minus side of face
+                um[q] = 0.0; 
+
+                // plus side of face
+                up[q] = 0.0; 
+
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    // "minus side": right face of zone i-1
+                    um[q]    += uli[NPOLY * q + l] * phir[l]; 
+
+                    // "plus side": left face of zone i
+                    up[q]    += ucc[NPOLY * q + l] * phil[l]; 
+                }
+            }
+
+            riemann_hlle(um, up, flux, cs2p, velocity_ceiling, 0);
+
+            // add viscous flux
+            if (nu > 0.0)
+            {
+                for (int q = 0; q < NCONS; ++q){
+    
+                    // minus side of face
+                    dudxm[q] = 0.0;
+                    dudym[q] = 0.0;
+    
+                    // plus side of face
+                    dudxp[q] = 0.0;
+                    dudyp[q] = 0.0;
+    
+                    for (int l = 0; l < NPOLY; ++l)
+                    {
+                        // "minus side": right face of zone i-1
+                        dudxm[q] += uli[NPOLY * q + l] * dphidxr[l];
+                        dudym[q] += uli[NPOLY * q + l] * dphidyr[l];
+    
+                        // "plus side": left face of zone i
+                        dudxp[q] += ucc[NPOLY * q + l] * dphidxl[l];
+                        dudyp[q] += ucc[NPOLY * q + l] * dphidyl[l];
+                    }
+                }
+
+                // velocity derivatives (average of minus and plus sides)
+                double dvxdx = dudxm[1] / um[0] - um[1] * dudxm[0] / um[0] / um[0]; 
+                double dvydx = dudxm[2] / um[0] - um[2] * dudxm[0] / um[0] / um[0]; 
+                double dvxdy = dudym[1] / um[0] - um[1] * dudym[0] / um[0] / um[0]; 
+                double dvydy = dudym[2] / um[0] - um[2] * dudym[0] / um[0] / um[0]; 
+    
+                dvxdx += dudxp[1] / up[0] - up[1] * dudxp[0] / up[0] / up[0]; 
+                dvydx += dudxp[2] / up[0] - up[2] * dudxp[0] / up[0] / up[0]; 
+                dvxdy += dudyp[1] / up[0] - up[1] * dudyp[0] / up[0] / up[0]; 
+                dvydy += dudyp[2] / up[0] - up[2] * dudyp[0] / up[0] / up[0];
+    
+                dvxdx *= 0.5; 
+                dvydx *= 0.5; 
+                dvxdy *= 0.5; 
+                dvydy *= 0.5;
+    
+                double mu = 0.5 * (um[0] + up[0]) * nu;
+    
+                // viscous stress tensor components
+                double tau_xx = 4.0 / 3.0 * dvxdx - 2.0 / 3.0 * dvydy; 
+                double tau_xy = dvxdy + dvydx;
+    
+                flux[1] -= mu * tau_xx;
+                flux[2] -= mu * tau_xy;
+            }
+
+            for (int q = 0; q < NCONS; ++q)
+            {
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    surface_term[NPOLY * q + l] -= flux[q] * nhat[0] * phil[l] * w[ip] * dx;
+                }
+            }            
+        }
+
+        // Right face
+        for (int ip = 0; ip < 3; ++ip)
+        {
+            double yp = yc + 0.5 * g[ip] * dy;
+            double cs2p = sound_speed_squared(cs2, mach_squared, eos_type, xr, yp, &mass_list);
+            int il = 0;
+
+            // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) and derivatives at face nodes
+            for (int m = 0; m < 3; ++m)
+            {
+                for (int n = 0; n < 3; ++n)
+                {
+                    if ((n + m) < 3)
+                    {
+                        // phi and derivatives at left side of zone
+                        phil[il]    =    pfl[m] *  p[n][ip];
+                        dphidxl[il] =   ppfl[m] *  p[n][ip];
+                        dphidyl[il] =    pfl[m] * pp[n][ip];
+                        // phi and derivatives at right side of zone
+                        phir[il]    =    pfr[m] *  p[n][ip];
+                        dphidxr[il] =   ppfr[m] *  p[n][ip];
+                        dphidyr[il] =    pfr[m] * pp[n][ip];      
+                        il += 1;
+                    }
+                }
+            }
+
+            for (int q = 0; q < NCONS; ++q)
+            {
+                // minus side of face
+                um[q] = 0.0; 
+
+                // plus side of face
+                up[q] = 0.0; 
+
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    // "minus side": right face of zone i
+                    um[q]    += ucc[NPOLY * q + l] * phir[l]; 
+
+                    // "plus side": left face of zone i+1
+                    up[q]    += uri[NPOLY * q + l] * phil[l]; 
+                }
+            }
+            riemann_hlle(um, up, flux, cs2p, velocity_ceiling, 0);
+
+            // add viscous flux
+            if (nu > 0.0)
+            {
+                for (int q = 0; q < NCONS; ++q){
+    
+                    // minus side of face
+                    dudxm[q] = 0.0;
+                    dudym[q] = 0.0;
+    
+                    // plus side of face
+                    dudxp[q] = 0.0;
+                    dudyp[q] = 0.0;
+    
+                    for (int l = 0; l < NPOLY; ++l)
+                    {
+                        // "minus side": right face of zone i
+                        dudxm[q] += ucc[NPOLY * q + l] * dphidxr[l];
+                        dudym[q] += ucc[NPOLY * q + l] * dphidyr[l];
+    
+                        // "plus side": left face of zone i+1
+                        dudxp[q] += uri[NPOLY * q + l] * dphidxl[l];
+                        dudyp[q] += uri[NPOLY * q + l] * dphidyl[l];
+                    }
+                }
+
+                // velocity derivatives (average of minus and plus sides)
+                double dvxdx = dudxm[1] / um[0] - um[1] * dudxm[0] / um[0] / um[0]; 
+                double dvydx = dudxm[2] / um[0] - um[2] * dudxm[0] / um[0] / um[0]; 
+                double dvxdy = dudym[1] / um[0] - um[1] * dudym[0] / um[0] / um[0]; 
+                double dvydy = dudym[2] / um[0] - um[2] * dudym[0] / um[0] / um[0]; 
+    
+                dvxdx += dudxp[1] / up[0] - up[1] * dudxp[0] / up[0] / up[0]; 
+                dvydx += dudxp[2] / up[0] - up[2] * dudxp[0] / up[0] / up[0]; 
+                dvxdy += dudyp[1] / up[0] - up[1] * dudyp[0] / up[0] / up[0]; 
+                dvydy += dudyp[2] / up[0] - up[2] * dudyp[0] / up[0] / up[0];
+    
+                dvxdx *= 0.5; 
+                dvydx *= 0.5; 
+                dvxdy *= 0.5; 
+                dvydy *= 0.5;
+    
+                double mu = 0.5 * (um[0] + up[0]) * nu;
+    
+                // viscous stress tensor components
+                double tau_xx = 4.0 / 3.0 * dvxdx - 2.0 / 3.0 * dvydy; 
+                double tau_xy = dvxdy + dvydx;
+    
+                flux[1] -= mu * tau_xx;
+                flux[2] -= mu * tau_xy;
+            }
+
+            for (int q = 0; q < NCONS; ++q)
+            {
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    surface_term[NPOLY * q + l] -= flux[q] * nhat[1] * phir[l] * w[ip] * dx;
+                }
+            }            
+        }
+
+        // Bottom face
+        for (int ip = 0; ip < 3; ++ip)
+        {
+            double xp = xc + 0.5 * g[ip] * dx;
+
+            double cs2p = sound_speed_squared(cs2, mach_squared, eos_type, xp, yl, &mass_list);
+
+            // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) and derivatives at face nodes
+            int il = 0;
+            for (int m = 0; m < 3; ++m)
+            {
+                for (int n = 0; n < 3; ++n)
+                {
+                    if ((n + m) < 3)
+                    {
+                        // phi and derivatives at left side of zone
+                        phil[il]    =    pfl[m] *  p[n][ip];
+                        dphidxl[il] =   ppfl[m] *  p[n][ip];
+                        dphidyl[il] =    pfl[m] * pp[n][ip];
+                        // phi and derivatives at right side of zone
+                        phir[il]    =    pfr[m] *  p[n][ip];
+                        dphidxr[il] =   ppfr[m] *  p[n][ip];
+                        dphidyr[il] =    pfr[m] * pp[n][ip];      
+                        il += 1;
+                    }
+                }
+            }
+
+            for (int q = 0; q < NCONS; ++q){
+
+                // minus side of face
+                um[q] = 0.0; 
+
+                // plus side of face
+                up[q] = 0.0; 
+
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    // "minus side": top face of zone j-1
+                    um[q]    += ulj[NPOLY * q + l] * phir[l]; 
+
+                    // "plus side": bottom face of zone ij
+                    up[q]    += ucc[NPOLY * q + l] * phil[l]; 
+                }
+            }
+
+            riemann_hlle(um, up, flux, cs2p, velocity_ceiling, 1);
+
+            // add viscous flux
+            if (nu > 0.0)
+            {
+                for (int q = 0; q < NCONS; ++q){
+
+                    // minus side of face
+                    dudxm[q] = 0.0;
+                    dudym[q] = 0.0;
+    
+                    // plus side of face
+                    dudxp[q] = 0.0;
+                    dudyp[q] = 0.0;
+    
+                    for (int l = 0; l < NPOLY; ++l)
+                    {
+                        // "minus side": top face of zone j-1
+                        dudxm[q] += ulj[NPOLY * q + l] * dphidxr[l];
+                        dudym[q] += ulj[NPOLY * q + l] * dphidyr[l];
+    
+                        // "plus side": bottom face of zone ij
+                        dudxp[q] += ucc[NPOLY * q + l] * dphidxl[l];
+                        dudyp[q] += ucc[NPOLY * q + l] * dphidyl[l];
+                    }
+                }
+
+                // velocity derivatives (average of minus and plus sides)
+                double dvxdx = dudxm[1] / um[0] - um[1] * dudxm[0] / um[0] / um[0]; 
+                double dvydx = dudxm[2] / um[0] - um[2] * dudxm[0] / um[0] / um[0]; 
+                double dvxdy = dudym[1] / um[0] - um[1] * dudym[0] / um[0] / um[0]; 
+                double dvydy = dudym[2] / um[0] - um[2] * dudym[0] / um[0] / um[0]; 
+    
+                dvxdx += dudxp[1] / up[0] - up[1] * dudxp[0] / up[0] / up[0]; 
+                dvydx += dudxp[2] / up[0] - up[2] * dudxp[0] / up[0] / up[0]; 
+                dvxdy += dudyp[1] / up[0] - up[1] * dudyp[0] / up[0] / up[0]; 
+                dvydy += dudyp[2] / up[0] - up[2] * dudyp[0] / up[0] / up[0];
+    
+                dvxdx *= 0.5; 
+                dvydx *= 0.5; 
+                dvxdy *= 0.5; 
+                dvydy *= 0.5;
+    
+                double mu = 0.5 * (um[0] + up[0]) * nu;
+    
+                // viscous stress tensor components
+                double tau_yy = 4.0 / 3.0 * dvydy - 2.0 / 3.0 * dvxdx; 
+                double tau_xy = dvxdy + dvydx;
+    
+                flux[1] -= mu * tau_xy;
+                flux[2] -= mu * tau_yy;
+            }
+
+            for (int q = 0; q < NCONS; ++q)
+            {
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    surface_term[NPOLY * q + l] -= flux[q] * nhat[0] * phil[l] * w[ip] * dy;
+                }
+            }            
+        }
+
+        // Top face
+        for (int ip = 0; ip < 3; ++ip)
+        {
+            double xp = xc + 0.5 * g[ip] * dx;
+
+            double cs2p = sound_speed_squared(cs2, mach_squared, eos_type, xp, yr, &mass_list);
+
+            // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) and derivatives at face nodes
+            int il = 0;
+            for (int m = 0; m < 3; ++m)
+            {
+                for (int n = 0; n < 3; ++n)
+                {
+                    if ((n + m) < 3)
+                    {
+                        // phi and derivatives at left side of zone
+                        phil[il]    =    pfl[m] *  p[n][ip];
+                        dphidxl[il] =   ppfl[m] *  p[n][ip];
+                        dphidyl[il] =    pfl[m] * pp[n][ip];
+                        // phi and derivatives at right side of zone
+                        phir[il]    =    pfr[m] *  p[n][ip];
+                        dphidxr[il] =   ppfr[m] *  p[n][ip];
+                        dphidyr[il] =    pfr[m] * pp[n][ip];      
+                        il += 1;
+                    }
+                }
+            }
+
+            for (int q = 0; q < NCONS; ++q){
+
+                // minus side of face
+                um[q] = 0.0; 
+
+                // plus side of face
+                up[q] = 0.0; 
+
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    // "minus side": top face of zone j
+                    up[q]    += ucc[NPOLY * q + l] * phir[l]; 
+
+                    // "plus side": bottom face of zone j+1
+                    um[q]    += urj[NPOLY * q + l] * phil[l]; 
+                }
+            }
+
+            riemann_hlle(um, up, flux, cs2p, velocity_ceiling, 1);
+
+            // add viscous flux
+            if (nu > 0.0)
+            {
+                for (int q = 0; q < NCONS; ++q){
+    
+                    // minus side of face
+                    dudxm[q] = 0.0;
+                    dudym[q] = 0.0;
+    
+                    // plus side of face
+                    dudxp[q] = 0.0;
+                    dudyp[q] = 0.0;
+    
+                    for (int l = 0; l < NPOLY; ++l)
+                    {
+                        // "minus side": top face of zone j
+                        dudxp[q] += ucc[NPOLY * q + l] * dphidxr[l];
+                        dudyp[q] += ucc[NPOLY * q + l] * dphidyr[l];
+    
+                        // "plus side": bottom face of zone j+1
+                        dudxm[q] += urj[NPOLY * q + l] * dphidxl[l];
+                        dudym[q] += urj[NPOLY * q + l] * dphidyl[l];
+                    }
+                }
+    
+                // velocity derivatives (average of minus and plus sides)
+                double dvxdx = dudxm[1] / um[0] - um[1] * dudxm[0] / um[0] / um[0]; 
+                double dvydx = dudxm[2] / um[0] - um[2] * dudxm[0] / um[0] / um[0]; 
+                double dvxdy = dudym[1] / um[0] - um[1] * dudym[0] / um[0] / um[0]; 
+                double dvydy = dudym[2] / um[0] - um[2] * dudym[0] / um[0] / um[0]; 
+    
+                dvxdx += dudxp[1] / up[0] - up[1] * dudxp[0] / up[0] / up[0]; 
+                dvydx += dudxp[2] / up[0] - up[2] * dudxp[0] / up[0] / up[0]; 
+                dvxdy += dudyp[1] / up[0] - up[1] * dudyp[0] / up[0] / up[0]; 
+                dvydy += dudyp[2] / up[0] - up[2] * dudyp[0] / up[0] / up[0];
+    
+                dvxdx *= 0.5; 
+                dvydx *= 0.5; 
+                dvxdy *= 0.5; 
+                dvydy *= 0.5;
+    
+                double mu = 0.5 * (um[0] + up[0]) * nu;
+    
+                // viscous stress tensor components 
+                double tau_yy = 4.0 / 3.0 * dvydy - 2.0 / 3.0 * dvxdx; 
+                double tau_xy = dvxdy + dvydx;
+    
+                flux[1] -= mu * tau_xy;
+                flux[2] -= mu * tau_yy;
+            }
+
+            for (int q = 0; q < NCONS; ++q)
+            {
+                for (int l = 0; l < NPOLY; ++l)
+                {
+                    surface_term[NPOLY * q + l] -= flux[q] * nhat[1] * phir[l] * w[ip] * dy;
+                }
+            }            
         }
 
         double *w0 = &weights0[ncc];
@@ -694,7 +1093,7 @@ PUBLIC void cbdiso_2d_advance_rk(
 
         for (int q = 0; q < NCONS; ++q)
         {
-            for (int l = 0; l < NK; ++l)
+            for (int l = 0; l < NPOLY; ++l)
             {
                 int n = NPOLY * q + l;
                 w2[n] = w1[n] + 0.5 * (surface_term[n] + volume_term[n]) * dt / (dx * dy);
@@ -704,27 +1103,8 @@ PUBLIC void cbdiso_2d_advance_rk(
     }
 }
 
-PUBLIC void cbdiso_2d_primitive_to_conserved(
-    int ni,
-    int nj,
-    double *primitive, // :: $.shape == (ni + 4, nj + 4, 3)
-    double *conserved) // :: $.shape == (ni + 4, nj + 4, 3)
-{
-    int ng = 2; // number of guard zones
-    int si = NCONS * (nj + 2 * ng);
-    int sj = NCONS;
 
-    FOR_EACH_2D(ni, nj)
-    {
-        int n = (i + ng) * si + (j + ng) * sj;
-
-        double *pc = &primitive[n];
-        double *uc = &conserved[n];
-        primitive_to_conserved(pc, uc);
-    }
-}
-
-PUBLIC void cbdiso_2d_point_mass_source_term(
+PUBLIC void cbdisodg_2d_point_mass_source_term(
     int ni,
     int nj,
     double patch_xl, // mesh
@@ -749,13 +1129,23 @@ PUBLIC void cbdiso_2d_point_mass_source_term(
     double sink_rate2,
     double sink_radius2,
     int sink_model2,
+    double velocity_ceiling,
     int which_mass, // :: $ in [1, 2]
-    double *weights, // :: $.shape == (ni + 2, nj + 2, 18)
+    double *weights, // :: $.shape == (ni + 2, nj + 2, 3, 6)
     double *cons_rate) // :: $.shape == (ni + 2, nj + 2, 3)
 {
     struct PointMass m1 = {x1, y1, vx1, vy1, mass1, softening_length1, sink_rate1, sink_radius1, sink_model1};
     struct PointMass m2 = {x2, y2, vx2, vy2, mass2, softening_length2, sink_rate2, sink_radius2, sink_model2};
     struct PointMassList mass_list = {{m1, m2}};
+
+    // Gaussian quadrature points in scaled domain xsi=[-1,1]
+    double g[3] = {-0.774596669241483, 0.000000000000000, 0.774596669241483};
+    // Gaussian weights at quadrature points
+    double w[3] = { 0.555555555555556, 0.888888888888889, 0.555555555555556};
+        // Scaled LeGendre polynomials at quadrature points
+    double p[3][3] = {{ 1.000000000000000, 1.000000000000000, 1.000000000000000},
+                      {-1.341640786499873, 0.000000000000000, 1.341640786499873},
+                      { 0.894427190999914, -1.11803398874990, 0.894427190999914}};
 
     int ng = 1; // number of guard zones
     int si = NCONS * NPOLY * (nj + 2 * ng);
@@ -766,21 +1156,77 @@ PUBLIC void cbdiso_2d_point_mass_source_term(
 
     FOR_EACH_2D(ni, nj)
     {
-        // TODO: integrate the source terms over the cell, and return the change in mass and
-        // momentum for the whole cell.
-
-        // int ncc = (i + ng) * si + (j + ng) * sj;
-
-        // double xc = patch_xl + (i + 0.5) * dx;
-        // double yc = patch_yl + (j + 0.5) * dy;
+        int ncc = (i + ng) * si + (j + ng) * sj;
+        double *ucc = &weights[ncc];
+        double *udot = &cons_rate[ncc];        
+        double xc = patch_xl + (i + 0.5) * dx;
+        double yc = patch_yl + (j + 0.5) * dy;
         // double *pc = &primitive[ncc];
         // double *uc = &cons_rate[ncc];
         // point_mass_source_term(&mass_list.masses[which_mass - 1], xc, yc, 1.0, pc, uc);
+
+        double u_dot[NCONS];
+        double u_dot_sum[NCONS];
+        double phi[NPOLY];
+
+        for (int q = 0; q < NCONS; ++q)
+        {
+            u_dot[q]     = 0.0;
+            u_dot_sum[q] = 0.0;
+        }
+
+        for (int ic = 0; ic < 3; ++ic)
+        {
+            for (int jc = 0; jc < 3; ++jc)
+            {
+                double xp = xc + 0.5 * g[ic] * dx;
+                double yp = yc + 0.5 * g[jc] * dy;
+                
+                // 2D basis functions phi_l(x,y) = P_m(x) * P_n(y) at cell points
+                int il = 0;
+                for (int m = 0; m < 3; ++m)
+                {
+                    for (int n = 0; n < 3; ++n)
+                    {
+                        if ((n + m) < 3)
+                        {
+                            phi[il]  =  p[m][ic] *  p[n][jc];
+                            il += 1;
+                        }
+                    }
+                }
+
+                double uij[NCONS];
+                double pij[NCONS];
+
+                for (int q = 0; q < NCONS; ++q)
+                {
+                    uij[q] = 0.0;
+
+                    for (int l = 0; l < NPOLY; ++l)
+                    {
+                        uij[q] += ucc[NPOLY * q + l] * phi[l];
+                    }
+                }
+
+                conserved_to_primitive(uij, pij, velocity_ceiling);
+                point_mass_source_term(&mass_list.masses[which_mass - 1], xp, yp, 1.0, pij, u_dot);
+                for (int q = 0; q < NCONS; ++q)
+                {
+                    u_dot_sum[q] += w[ic] * w[jc] * u_dot[q];
+                }
+            }
+        }
+
+        for (int q = 0; q < NCONS; ++q)
+        {
+            udot[q] = u_dot_sum[q];
+        }
     }
 }
 
 
-PUBLIC void cbdiso_2d_wavespeed(
+PUBLIC void cbdisodg_2d_wavespeed(
     int ni, // mesh
     int nj,
     double patch_xl,
@@ -808,7 +1254,8 @@ PUBLIC void cbdiso_2d_wavespeed(
     double sink_rate2,
     double sink_radius2,
     int sink_model2,
-    double *weights, // :: $.shape == (ni + 2, nj + 2, 18)
+    double velocity_ceiling,
+    double *weights,   // :: $.shape == (ni + 2, nj + 2, 3, 6)
     double *wavespeed) // :: $.shape == (ni + 2, nj + 2)
 {
     struct PointMass m1 = {x1, y1, vx1, vy1, mass1, softening_length1, sink_rate1, sink_radius1, sink_model1};
@@ -825,17 +1272,25 @@ PUBLIC void cbdiso_2d_wavespeed(
 
     FOR_EACH_2D(ni, nj)
     {
-        // TODO: compute the wavespeed from cons_to_prim(zero_weight).
+        int np = (i + ng) * si + (j + ng) * sj;
+        int na = (i + ng) * ti + (j + ng) * tj;
+        double x = patch_xl + (i + 0.5) * dx;
+        double y = patch_yl + (j + 0.5) * dy;
+        
+        double *ucc = &weights[np];
 
-        // int np = (i + ng) * si + (j + ng) * sj;
-        // int na = (i + ng) * ti + (j + ng) * tj;
+        double uij[NCONS];
+        double pij[NCONS];
 
-        // double x = patch_xl + (i + 0.5) * dx;
-        // double y = patch_yl + (j + 0.5) * dy;
+        // use zeroth weights for zone average of conserved variables
+        for (int q = 0; q < NCONS; ++q)
+        {
+            uij[q] = ucc[NPOLY * q + 0];
+        }
 
-        // double *pc = &primitive[np];
-        // double cs2 = sound_speed_squared(soundspeed2, mach_squared, eos_type, x, y, &mass_list);
-        // double a = primitive_max_wavespeed(pc, cs2);
-        // wavespeed[na] = a;
+        conserved_to_primitive(uij, pij, velocity_ceiling);
+        double cs2 = sound_speed_squared(soundspeed2, mach_squared, eos_type, x, y, &mass_list);
+        double a = primitive_max_wavespeed(pij, cs2);
+        wavespeed[na] = a;
     }
 }
