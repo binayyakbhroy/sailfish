@@ -59,11 +59,14 @@ for filename in args.checkpoints:
     fig.set_size_inches(40.0, 40.0)
     chkpt = load_checkpoint(filename, require_solver="cbdiso_2d")
     time_series_data = np.array(chkpt["timeseries"])
-    Lz1 = -1.0 * time_series_data[:, 4]
-    Lz2 = -1.0 * time_series_data[:, 8]
-    mdot1 = -1.0 * time_series_data[:, 1]
-    mdot2 = -1.0 * time_series_data[:, 5]
-    time = time_series_data[:, 0]
+    if len(time_series_data) != 0:
+        Lz1 = -1.0 * time_series_data[:, 4]
+        Lz2 = -1.0 * time_series_data[:, 8]
+        mdot1 = -1.0 * time_series_data[:, 1]
+        mdot2 = -1.0 * time_series_data[:, 5]
+        time = time_series_data[:, 0]
+    else:
+        Lz1, Lz2, mdot1, mdot2, time = [], [], [], [], []
     prim = chkpt["primitive"]
     f = fields[args.field](prim).T
     cm1 = ax1[0][0].imshow(f, origin="lower", vmin=vmin, vmax=vmax, cmap="magma")
