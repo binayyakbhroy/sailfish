@@ -58,7 +58,6 @@ struct PointMassList
 struct KeplerianBuffer
 {
     double surface_density;
-    double surface_pressure;
     double central_mass;
     double driving_rate;
     double outer_radius;
@@ -119,14 +118,17 @@ PRIVATE void point_mass_source_term(
     double sink_rate = (dr < 4.0 * r_sink) ? mass->sink_rate * exp(-pow(dr / r_sink, 4.0)) : 0.0;
     double mdot = sigma * sink_rate * -1.0;
 
+    delta_cons[0] = 0.0;
+    delta_cons[1] = fx * dt;
+    delta_cons[2] = fy * dt;
+
     switch (mass->sink_model)
     {
     case 1: // acceleration-free
     {
-        delta_cons[0] = dt * mdot;
-        delta_cons[1] = dt * mdot * prim[1] + dt * fx;
-        delta_cons[2] = dt * mdot * prim[2] + dt * fy;
-        delta_cons[3] = dx * (dt * mdot * prim[2]) - dy * (dt * mdot * prim[1]);
+        delta_cons[0] += dt * mdot;
+        delta_cons[1] += dt * mdot * prim[1];
+        delta_cons[2] += dt * mdot * prim[2];
         break;
     }
     case 2: // torque-free
@@ -140,26 +142,23 @@ PRIVATE void point_mass_source_term(
         double dvdotrhat = (vx - vx0) * rhatx + (vy - vy0) * rhaty;
         double vxstar = dvdotrhat * rhatx + vx0;
         double vystar = dvdotrhat * rhaty + vy0;
-        delta_cons[0] = dt * mdot;
-        delta_cons[1] = dt * mdot * vxstar + dt * fx;
-        delta_cons[2] = dt * mdot * vystar + dt * fy;
-        delta_cons[3] = dx * (dt * mdot * vystar) - dy * (dt * mdot * vxstar);
+        delta_cons[0] += dt * mdot;
+        delta_cons[1] += dt * mdot * vxstar;
+        delta_cons[2] += dt * mdot * vystar;
         break;
     }
     case 3: // force-free
     {
-        delta_cons[0] = dt * mdot;
-        delta_cons[1] = dt * fx;
-        delta_cons[2] = dt * fy;
-        delta_cons[3] = 0.0;
+        delta_cons[0] += dt * mdot;
+        delta_cons[1] += 0.0;
+        delta_cons[2] += 0.0;
         break;
     }
     default: // sink is inactive
     {
-        delta_cons[0] = 0.0;
-        delta_cons[1] = 0.0;
-        delta_cons[2] = 0.0;
-        delta_cons[3] = 0.0;
+        delta_cons[0] += 0.0;
+        delta_cons[1] += 0.0;
+        delta_cons[2] += 0.0;
         break;
     }
     }
@@ -428,6 +427,7 @@ PUBLIC void cbdiso_2d_advance_rk(
         buffer_outer_radius,
         buffer_onset_width,
         buffer_is_enabled};
+
     struct PointMass m1 = {x1, y1, vx1, vy1, mass1, softening_length1, sink_rate1, sink_radius1, sink_model1};
     struct PointMass m2 = {x2, y2, vx2, vy2, mass2, softening_length2, sink_rate2, sink_radius2, sink_model2};
     struct PointMassList mass_list = {{m1, m2}};
@@ -621,7 +621,7 @@ PUBLIC void cbdiso_2d_point_mass_source_term(
     double patch_xr,
     double patch_yl,
     double patch_yr,
-    double x1, // point mass 1
+    double x1, // particle
     double y1,
     double vx1,
     double vy1,
@@ -630,22 +630,10 @@ PUBLIC void cbdiso_2d_point_mass_source_term(
     double sink_rate1,
     double sink_radius1,
     int sink_model1,
-    double x2, // point mass 2
-    double y2,
-    double vx2,
-    double vy2,
-    double mass2,
-    double softening_length2,
-    double sink_rate2,
-    double sink_radius2,
-    int sink_model2,
-    int which_mass,    // :: $ in [1, 2]
     double *primitive, // :: $.shape == (ni + 4, nj + 4, 3)
     double *cons_rate) // :: $.shape == (ni + 4, nj + 4, 4)
 {
     struct PointMass m1 = {x1, y1, vx1, vy1, mass1, softening_length1, sink_rate1, sink_radius1, sink_model1};
-    struct PointMass m2 = {x2, y2, vx2, vy2, mass2, softening_length2, sink_rate2, sink_radius2, sink_model2};
-    struct PointMassList mass_list = {{m1, m2}};
 
     int ng = 2;                           // number of guard zones
     int si = (NCONS + 1) * (nj + 2 * ng); // The +1 because of the angular momentum component
@@ -665,7 +653,7 @@ PUBLIC void cbdiso_2d_point_mass_source_term(
         double yc = patch_yl + (j + 0.5) * dy;
         double *pc = &primitive[ncc_p];
         double *uc = &cons_rate[ncc];
-        point_mass_source_term(&mass_list.masses[which_mass - 1], xc, yc, 1.0, pc, uc);
+        point_mass_source_term(&m1, xc, yc, 1.0, pc, uc);
     }
 }
 

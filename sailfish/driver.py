@@ -356,6 +356,7 @@ def simulate(driver):
     end_time = first_not_none(driver.end_time, setup.default_end_time, float("inf"))
     reference_time = setup.reference_time_scale
     new_timestep_cadence = driver.new_timestep_cadence or 1
+    dt = None
 
     solver = make_solver(
         setup.solver,
@@ -423,7 +424,7 @@ def simulate(driver):
 
         with measure_time() as fold_time:
             for _ in range(fold):
-                if iteration % new_timestep_cadence == 0:
+                if dt is None or (iteration % new_timestep_cadence == 0):
                     dx = mesh.min_spacing(siml_time)
                     dt = dx / solver.maximum_wavespeed() * cfl_number
                 solver.advance(dt)
@@ -512,23 +513,29 @@ def load_user_config():
         config = ConfigParser()
         config.read(".sailfish")
 
-        for setup_extension in config["extensions"]["setups"].split():
-            import_module(setup_extension)
+        try:
+            for setup_extension in config["extensions"]["setups"].split():
+                import_module(setup_extension)
+        except KeyError:
+            pass
 
-        for solver_extension in config["extensions"]["solvers"].split():
-            register_solver_extension(solver_extension)
+        try:
+            for solver_extension in config["extensions"]["solvers"].split():
+                register_solver_extension(solver_extension)
+        except KeyError:
+            pass
 
-        for key, val in config["build"].items():
-            user_build_config[key] = val
+        try:
+            for key, val in config["build"].items():
+                user_build_config[key] = val
+        except KeyError:
+            pass
 
     except ModuleNotFoundError as e:
         raise ExtensionError(e)
 
     except ParsingError as e:
         raise ConfigurationError(e)
-
-    except KeyError:
-        pass
 
 
 def main():
